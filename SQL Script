@@ -1,0 +1,394 @@
+Drop table if exists epr_stage.country_mapping;
+Create table if not exists epr_stage.country_mapping (
+   Market varchar(100)
+  ,country_name varchar(100)
+  ,country_code_2d varchar(2)
+  ,country_code_3d varchar(3)
+);
+
+INSERT into epr_stage.country_mapping
+values
+ ('SSA',      'Benin',         'BJ',  'BEN'),
+    ('SSA',      'Cameroon',      'CM',  'CMR'),
+    ('SSA',      'Congo',         'CG',  'COG'),
+    ('SSA',      'D Congo',       'CD',  'COD'),
+    ('SSA',      'Gabon',         'GA',  'GAB'),
+    ('SSA',      'Ivory Coast',   'CI',  'CIV'),
+    ('SSA',      'Kenya',         'KE',  'KEN'),
+    ('SSA',      'Mauritius',     'MU',  'MUS'),
+    ('SSA',      'Nigeria',       'NG',  'NGA'),
+    ('SSA',      'Senegal',       'SN',  'SEN'),
+    ('SSA',      'Togo',          'TG',  'TGO'),
+    
+    ('N Africa', 'Algeria',       'DZ',  'DZA'),
+    ('N Africa', 'Egypt',         'EG',  'EGY'),
+    ('N Africa', 'Morocco',       'MA',  'MAR'),
+    
+    ('GNE',      'Bahrain',       'BH',  'BHR'),
+    ('GNE',      'Jordan',        'JO',  'JOR'),
+    ('GNE',      'Kuwait',        'KW',  'KWT'),
+    ('GNE',      'Lebanon',       'LB',  'LBN'),
+    ('GNE',      'Oman',          'OM',  'OMN'),
+    ('GNE',      'Qatar',         'QA',  'QAT'),
+    ('GNE',      'UAE',           'AE',  'ARE'),
+    
+    ('KSA',      'KSA',           'SA',  'SAU'),
+    ('Pakistan', 'Pakistan',      'PK',  'PAK'),
+    ('RSA',      'RSA',           'ZA',  'ZAF'),
+    ('Türkiye',  'Türkiye',       'TR',  'TUR')
+    ;
+Drop table if exists epr_stage.call_consent;
+create table if not exists epr_stage.call_consent as 
+
+select a.call_date
+,a.dated
+,acc.nvs_country__c as country_code
+,Spec.Master_Specialty as Specialty
+,count(distinct a.account_id) as unique_visits
+,count(a.account_id) as total_visits
+,count(distinct case when b.RepEmail_consent= 'Y' then a.account_id else null end) as email_consent_
+,count(distinct case when b.Whatsapp_consent= 'Y' then a.account_id else null end) as Whatsapp_consent_
+,count(distinct case when b.veeva_consent= 'Y' then a.account_id else null end) as veeva_consent_
+,count(distinct case when b.Call_consent= 'Y' then a.account_id else null end) as call_consent_
+from 
+(Select  id as call_id
+,Account_vod__c as account_id 
+,concat('Q', Quarter(cast(Call_Date_vod__c as date)),' ', Year(cast(Call_Date_vod__c as date)))  as call_date
+,year(cast(Call_Date_vod__c as date)) * 10  + Quarter(cast(Call_Date_vod__c as date)) AS dated
+
+from epr_stage.fsfa_call 
+where ((Territory_vod__c LIKE '%21.%') OR (Territory_vod__c LIKE '%22.%')) AND (Territory_vod__c IS NOT NULL)
+and isdeleted = 'False'
+and Call_Date_vod__c >= '2024-01-01'
+) as a
+
+left join
+
+(SELECT  
+distinct CONS_B.account_vod__c
+,max(case when Master_Consent_Type = 'RepEmail' then 'Y' else 'N' end) as RepEmail_consent
+,max(case when Master_Consent_Type = 'Call' then 'Y' else 'N' end) as Call_consent
+,max(case when Master_Consent_Type = 'MassEmail' then 'Y' else 'N' end) as MassEmail_consent
+,max(case when Master_Consent_Type = 'WhatsApp' then 'Y' else 'N' end) as WhatsApp_consent
+,max(case when Master_Consent_Type = 'OtherChannel' then 'Y' else 'N' end) as OtherChannel_consent
+,case when max(case when Master_Consent_Type = 'RepEmail' then 'Y' else 'N' end) = 'Y' OR max(case when Master_Consent_Type = 'MassEmail' then 'Y' else 'N' end) = 'Y' then 'Y' Else 'N' end as veeva_consent
+FROM
+(
+SELECT CONS_A.* 
+, ROW_NUMBER() Over (PArtition by Account_vod__c, MAster_Consent_Type order by Capture_Datetime_vod__c DESC, Name DESC) AS RNK  
+FROM
+
+(Select A.*,B.DeveloperName ,
+CASE WHEN B.DeveloperName ='Approved_Email_vod' and A.Sub_Channel_Key_vod__c IS NULL THEN 'RepEmail'
+WHEN (B.DeveloperName ='gsk_core_ED_ReadOnly_Consent' or B.DeveloperName ='Approved_Email_vod') and A.Sub_Channel_Key_vod__c in('sms','instantMsg') THEN 'WhatsApp'
+WHEN (B.DeveloperName ='gsk_core_ED_ReadOnly_Consent' or B.DeveloperName ='Approved_Email_vod')  and A.Sub_Channel_Key_vod__c in('audioCall','videoCall') THEN 'Call' 
+WHEN (B.DeveloperName ='gsk_core_ED_ReadOnly_Consent' or B.DeveloperName ='Approved_Email_vod')  and A.Sub_Channel_Key_vod__c in('marketingEmail') THEN 'MassEmail' ELSE 'Other_channel' END Master_Consent_Type
+from epr_stage.fsfa_multichannelconsent A
+INNER JOIN epr_stage.fsfa_recordtype B on A.RecordTypeId = B.Id
+where 
+IsDeleted='False'
+) CONS_A
+) CONS_B 
+where RNK='1' and Opt_Type_vod__c='Opt_In_vod' 
+and (cast(Opt_Expiration_Date_vod__c as date) >  GETDATE() or Opt_Expiration_Date_vod__c is NULL)
+--and account_vod__c = '0010o00002AjeuLAAR'
+group by 
+CONS_B.account_vod__c
+--,CONS_B.Master_Consent_Type
+) as b
+on a.account_id = b.account_vod__c
+
+LEFT JOIN EPR_Stage.FSFA_Account Acc
+ON a.account_id = Acc.Id
+LEFT JOIN EPR_Stage.Manual_Specialty_mapping Spec
+ON COALESCE (Acc.Specialty_1_vod__c,'') = COALESCE (Spec.Account_Specialty,'')
+LEFT JOIN EPR_Stage.Manual_Segment_mapping Seg
+ON Acc.nvs_Segment__c = Seg.Account_Segment
+LEFT JOIN EPR_Stage.FSFA_Address Addr
+ON Acc.nvs_Addresses__c = Addr.Id
+
+Group by 
+a.call_date
+,a.dated
+,acc.nvs_country__c 
+,Spec.Master_Specialty
+
+from pyspark.sql import SparkSession
+sql = """select * from epr_stage.call_consent"""
+spark = SparkSession.builder.getOrCreate()
+df = spark.sql(sql)
+display(df)
+
+import matplotlib.pyplot as plt
+import pandas as pd
+dated = pd.to_datetime(df.toPandas()['dated'])
+for s in df.select('Specialty').distinct().toPandas()['Specialty']:
+  specialty_data = df[df['Specialty'] == s].toPandas()
+  plt.plot(specialty_data['dated'], specialty_data['call_consent_'], label=s)
+plt.legend()
+plt.show()
+
+%sql
+Drop table if exists epr_stage.message;
+create table if not exists epr_stage.message as 
+
+select
+a.Captured_Date
+,a.dated
+,acc.nvs_Country__c as country_code
+,Spec.Master_Specialty
+,count(distinct CASE when clicked = 1 then a.account_id else null end) as Whatsapp_unique_hcps_clicked
+,count(distinct CASE when clicked = 1 then a.SentMessage_Id else null end) as Whatsapp_engagements
+,count(distinct a.SentMessage_Id) as Whatsapp_sent_msgs
+,count(distinct case when clicked = 1 then SentMessage_Id else null end) * 1.0 / count(distinct sentmessage_id) * 1.0 as Whatsapp_open_rate
+,count(distinct case when Transaction_Type = 'Remote_CLM_Link_vod' and Clicked = 1 then SentMessage_Id else null end) as Whatsapp_remote_clm_link
+
+From
+
+(Select id as SentMessage_Id
+,Transaction_Type_vod__c as Transaction_Type
+,concat('Q', Quarter(cast(Capture_Datetime_vod__c as date)),' ', Year(cast(Capture_Datetime_vod__c as date)))  as Captured_Date
+,year(cast(Capture_Datetime_vod__c as date)) * 10  + Quarter(cast(Capture_Datetime_vod__c as date)) AS dated
+,Clicked_vod__c as clicked
+,Account_vod__c as account_id  
+from epr_stage.fsfa_sent_message 
+WHERE capture_datetime_vod__c >= '2024-01-01'
+) as a
+
+inner join 
+
+(Select  id as call_id
+,Account_vod__c as account_id 
+,concat('Q', Quarter(cast(Call_Date_vod__c as date)),' ', Year(cast(Call_Date_vod__c as date)))  as call_date
+from epr_stage.fsfa_call 
+where ((Territory_vod__c LIKE '%21.%') OR (Territory_vod__c LIKE '%22.%')) AND (Territory_vod__c IS NOT NULL)
+and isdeleted = 'False'
+and Call_Date_vod__c >= '2024-01-01') as b
+on a.account_id = b.account_id
+and a.Captured_Date = b.call_date
+
+LEFT JOIN EPR_Stage.FSFA_Account Acc
+ON a.account_id = Acc.Id
+LEFT JOIN EPR_Stage.Manual_Specialty_mapping Spec
+ON COALESCE (Acc.Specialty_1_vod__c,'') = COALESCE (Spec.Account_Specialty,'')
+LEFT JOIN EPR_Stage.Manual_Segment_mapping Seg
+ON Acc.nvs_Segment__c = Seg.Account_Segment
+LEFT JOIN EPR_Stage.FSFA_Address Addr
+ON Acc.nvs_Addresses__c = Addr.Id
+
+group by 
+a.Captured_Date
+,a.dated
+,acc.nvs_Country__c 
+,Spec.Master_Specialty
+%sql
+Drop table if exists epr_stage.email;
+create table if not exists epr_stage.email as 
+
+select
+a.Email_Sent_Date
+,a.dated
+,acc.nvs_Country__c as country_code
+,Spec.Master_Specialty
+,count(distinct CASE when Opened = 1 and status = 'Delivered_vod' then a.Account_Id else null end) as Unique_Email_Reach
+,count(distinct CASE when Opened = 1 and status = 'Delivered_vod' then concat(a.Account_Id,a.Subject) else null end) as Unique_Emails_Sent_opened
+,count(distinct concat(a.Account_Id,a.Subject)) as Unique_Emails_Sent
+,count(distinct CASE when Clicked = 1 and status = 'Delivered_vod' then concat(a.Account_Id,a.Subject) else null end) as Clicked_Emails
+,count(distinct CASE when status = 'Delivered_vod' then concat(a.Account_Id,a.Subject) else null end) as Delivered_Emails
+,count(distinct Subject) as Email_Campaign
+
+From
+
+(Select id as SentEmail_Id
+,concat('Q', Quarter(cast(Email_Sent_Date_vod__c as date)),' ', Year(cast(Email_Sent_Date_vod__c as date)))  as Email_Sent_Date
+,year(cast(Email_Sent_Date_vod__c as date)) * 10  + Quarter(cast(Email_Sent_Date_vod__c as date)) AS dated
+,Opened_vod__c as Opened
+,Account_vod__c as account_id 
+,clicked_vod__c as Clicked 
+,Subject_vod__c as Subject
+,Status_vod__c as status
+from epr_stage.fsfa_sentemail 
+WHERE Email_Sent_Date_vod__c >= '2024-01-01'
+) as a
+
+inner join 
+
+(Select  id as call_id
+,Account_vod__c as account_id 
+,concat('Q', Quarter(cast(Call_Date_vod__c as date)),' ', Year(cast(Call_Date_vod__c as date)))  as call_date
+from epr_stage.fsfa_call 
+where ((Territory_vod__c LIKE '%21.%') OR (Territory_vod__c LIKE '%22.%')) AND (Territory_vod__c IS NOT NULL)
+and isdeleted = 'False'
+and Call_Date_vod__c >= '2024-01-01') as b
+on a.account_id = b.account_id
+and a.Email_Sent_Date = b.call_date
+
+LEFT JOIN EPR_Stage.FSFA_Account Acc
+ON a.account_id = Acc.Id
+LEFT JOIN EPR_Stage.Manual_Specialty_mapping Spec
+ON COALESCE (Acc.Specialty_1_vod__c,'') = COALESCE (Spec.Account_Specialty,'')
+LEFT JOIN EPR_Stage.Manual_Segment_mapping Seg
+ON Acc.nvs_Segment__c = Seg.Account_Segment
+LEFT JOIN EPR_Stage.FSFA_Address Addr
+ON Acc.nvs_Addresses__c = Addr.Id
+
+group by 
+a.Email_Sent_Date
+,a.dated
+,acc.nvs_Country__c 
+,Spec.Master_Specialty
+
+%sql
+--epr_stage.email
+--epr_stage.message
+--epr_stage.call_consent
+
+drop table if exists epr_stage.cohort;
+create table if not exists epr_stage.cohort as
+
+select 
+distinct
+f.Market as Market_
+,coalesce(a.country_code, b.country_code, c.country_code, d.country_code_2d, e.FSFA_Country_Code) as country_code
+,coalesce(a.call_date, b.Captured_Date, c.Email_Sent_Date, d.Registered_Timestamp, e.Target_Period) as date_
+,coalesce(a.Specialty, b.Master_Specialty, c.Master_Specialty, d.Master_Specialty, e.specialty) as specialty_
+,coalesce(a.dated, b.dated, c.dated, d.dated) as dated
+
+
+,a.total_visits
+,a.unique_visits
+,a.veeva_consent_
+,a.Whatsapp_consent_
+,a.call_consent_
+,a.email_consent_
+
+,b.Whatsapp_sent_msgs
+,b.Whatsapp_open_rate
+,b.Whatsapp_engagements
+,b.Whatsapp_unique_hcps_clicked
+,b.Whatsapp_remote_clm_link
+
+,c.Unique_Email_Reach
+,c.Unique_Emails_Sent
+,c.Unique_Emails_Sent_opened
+,c.Delivered_Emails
+,c.Clicked_Emails
+
+,d.new_registrations
+,d.total_reg
+,d.spec_total_reg
+
+,e.*
+
+from epr_stage.call_consent a
+
+full outer join
+epr_stage.message b 
+on a.country_code = b.country_code
+and a.Specialty = b.Master_Specialty  
+and a.call_date = b.Captured_Date
+
+full outer join
+epr_stage.email c
+on a.country_code = c.country_code
+and a.Specialty = c.Master_Specialty  
+and a.call_date = c.Email_Sent_Date
+
+full outer join
+epr_stage.HHP d
+on a.country_code = d.country_code_2d
+and a.Specialty = d.Master_Specialty  
+and a.call_date = d.Registered_Timestamp
+
+full outer join
+epr_stage.manual_specialty_targets e
+on a.country_code = e.FSFA_Country_Code
+and a.Specialty = e.specialty 
+and a.call_date = e.Target_Period
+
+left join
+epr_stage.country_mapping f
+on coalesce(a.country_code, b.country_code, c.country_code, d.country_code_2d, e.FSFA_Country_Code) = f.country_code_2d
+
+%sql
+drop table if exists epr_stage.HHP;
+create table if not exists epr_stage.HHP as
+
+Select main.country_code_2d
+,main.Registered_Timestamp
+,main.dated
+,main.Master_Specialty
+,main.registrations as new_registrations
+,sum(registrations) over (partition by country_code_2d order by dated) as total_reg
+,sum(registrations) over (partition by country_code_2d, master_specialty order by dated) as spec_total_reg
+
+
+from
+(Select c.country_code_2d
+,a.Registered_Timestamp
+,Spec.Master_Specialty
+,a.dated
+,count(distinct A.gigyaid) as registrations
+
+from
+(Select UID as gigyaid
+,concat('Q', Quarter(cast(registered as date)),' ', Year(cast(registered as date)))  as Registered_Timestamp
+,year(cast(registered as date)) * 10  + Quarter(cast(registered as date)) AS dated
+,MarketCode
+,dataPROFESSION 
+from epr_stage.gigya_account) a
+left join 
+epr_stage.gigya_emailaccounts b
+on a.gigyaid = b.UID
+left join epr_stage.country_mapping c
+on a.MarketCode = c.country_code_3d
+LEFT JOIN EPR_Stage.FSFA_Account Acc
+ON a.gigyaid= Acc.gsk_Gigya_ID__c
+LEFT JOIN EPR_Stage.Manual_Specialty_mapping Spec
+ON Lower(COALESCE (A.dataPROFESSION,'')) = Lower(COALESCE (Spec.Account_Specialty,''))
+
+--WHERE spec.Master_Specialty in ('Dentist','PH','GP')
+--WHERE c.country_code_2d = 'PK'
+--AND a.Registered_Timestamp = 'Q1 2025'
+
+group by
+c.country_code_2d
+,a.Registered_Timestamp
+,Spec.Master_Specialty
+,a.dated
+) as main
+
+group by
+
+ main.country_code_2d
+,main.Registered_Timestamp
+,main.Master_Specialty
+,main.dated
+,main.registrations
+
+%sql
+Select 
+right(a.MarketCode,2) as country_code
+,spec.Master_Specialty
+,concat('Q', Quarter(cast(Call_Date_vod__c as date)),' ', Year(cast(Call_Date_vod__c as date)))  as call_date
+,year(cast(Call_Date_vod__c as date)) * 10  + Quarter(cast(Call_Date_vod__c as date)) AS dated
+,count(distinct Account_vod__c) as unique_reach
+
+
+from epr_stage.fsfa_call a
+LEFT JOIN EPR_Stage.FSFA_Account Acc
+ON a.Account_vod__c = Acc.Id
+LEFT JOIN EPR_Stage.Manual_Specialty_mapping Spec
+ON COALESCE (Acc.Specialty_1_vod__c,'') = COALESCE (Spec.Account_Specialty,'')
+
+where ((a.Territory_vod__c LIKE '%21.%') OR (a.Territory_vod__c LIKE '%22.%')) AND (a.Territory_vod__c IS NOT NULL)
+and a.isdeleted = 'False'
+and Call_Date_vod__c >= '2025-01-01'
+and Call_Date_vod__c <= '2025-03-31'
+
+and right(a.MarketCode,2) = 'TR'
+
+group by country_code
+,spec.Master_Specialty
+,call_date
+,dated
